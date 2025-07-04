@@ -44,7 +44,7 @@ LLM-Gmail connects to your Gmail account via Google's official APIs (for email r
 ### Prerequisites
 
   * Python 3.x
-  * A Gmail account with API access configured (instructions to follow).
+  * A Gmail account with API access configured (instructions below).
   * Sufficient local resources (CPU/GPU and RAM) for running your chosen LLM.
   * **uv**: Follow the official installation guide for `uv` [here](https://docs.astral.sh/uv/getting-started/installation/).
   * **Podman or Docker** (recommended for running Ramalama, though Ramalama will attempt to run models directly if neither is installed).
@@ -57,7 +57,9 @@ LLM-Gmail connects to your Gmail account via Google's official APIs (for email r
     cd llm-gmail
     ```
 2.  **Configure Gmail API:**
-    *(Instructions on how to enable the Gmail API, create credentials, and download `credentials.json` will go here.)*
+    To allow LLM-Gmail to access your Gmail account, you need to set up Google's Gmail API. Follow the official guide to enable the API, create credentials, and download your `credentials.json` file:
+    [https://developers.google.com/workspace/gmail/api/quickstart/python](https://developers.google.com/workspace/gmail/api/quickstart/python)
+    **Place the downloaded `credentials.json` file in the root directory of this project.**
 
 ### Running LLM-Gmail
 
