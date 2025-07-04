@@ -1,9 +1,14 @@
+import base64
 import datetime
+import email as email_lib
 import json
+import html
 import logging
 import os.path
+import re
 from typing import List
 
+from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -17,7 +22,6 @@ logging.basicConfig(level=logging.INFO,
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-LAST_RUN_FILE = "last_run.json"
 
 EMAIL_CACHE = []
 
@@ -52,32 +56,47 @@ def gmail_client() -> Resource:
     return service
 
 
-def get_last_run_time() -> datetime:
-    """Gets the last run time from file or returns a default time."""
-    if os.path.exists(LAST_RUN_FILE):
-        with open(LAST_RUN_FILE, 'r') as last_run_f:
-            data = json.load(last_run_f)
-            return datetime.datetime.fromisoformat(data['last_run'])
-    return datetime.datetime.now() - datetime.timedelta(days=7)  # Default to 7 days ago if no last run
+def extract_text(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    text = soup.get_text(separator=' ')
+    return html.unescape(text).strip()
 
 
-def build_query(last_run: datetime) -> str:
-    """Builds the query string for fetching emails."""
-    return f"is:unread after:{last_run.strftime('%Y/%m/%d')}"
+def parse_email(mime_content):
+    msg = email_lib.message_from_string(mime_content)
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            body = part.get_payload(decode=True)
+            if 'html' in content_type:
+                return extract_text(body.decode())
+    else:
+        return extract_text(msg.get_payload(decode=True))
 
 
-def callback_fetch_email(id, response, exception):
+def callback_fetch_email(id, message, exception):
     if exception is not None:
         print(exception)
     else:
         email = {}
-        email['snippet'] = response['snippet']
-        title_and_from = filter(lambda dct: dct['name'] in ['Subject', 'From'], response['payload']['headers'])
-        for header in title_and_from:
-            if header['name'] == 'Subject':
-                email['subject'] = header['value']
-            else:
-                email['from'] = header['value']
+        msg = email_lib.message_from_bytes(
+            base64.urlsafe_b64decode(message['raw']))
+        email['body'] = ''
+
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                body = part.get_payload(decode=True)
+                if 'html' in content_type:
+                    email['body'] += extract_text(body.decode())
+        else:
+            email['body'] += extract_text(msg.get_payload(decode=True))
+
+
+        email['from'] = msg['from']
+        email['subject'] = msg['subject']
+        email['to'] = msg['to']
+
         EMAIL_CACHE.append(email)
 
 
@@ -93,18 +112,10 @@ def fetch_emails(gmail: Resource, query: str) -> List[dict]:
     message_ids = results.get("messages", [])
     batch = gmail.new_batch_http_request(callback=callback_fetch_email)
     for message in message_ids:
-        batch.add(gmail.users().messages().get(userId="me", id=message['id']))
+        batch.add(gmail.users().messages().get(userId="me", id=message['id'],
+                                               format='raw'))
     batch.execute()
     return EMAIL_CACHE
-
-def get_labels(gmail: Resource) -> List[str]:
-    results = gmail.users().labels().list(userId="me").execute()
-    labels = results.get("labels", [])
-
-    if not labels:
-        print("No labels found.")
-        return
-    return labels
 
 
 def call_ramalama_api(api, method, data=None):
@@ -114,39 +125,35 @@ def call_ramalama_api(api, method, data=None):
         return r.json()
 
 
-CATEGORY_LABELS = [
-    'JIRA',
-    'OpenStack Gerrit',
-    'rhos-compute',
-    'Other'
-]
-
-def categorize_email_with_ollama(email_content: str) -> str:
-    """Categorizes an email using the local Ollama LLM."""
+def summarize_email_with_ollama(email_content: str) -> str:
+    """Summarizes an email using the local Ollama LLM."""
     try:
-        system_prompt = f"""I give you a list of categories :
-            {', '.join(CATEGORY_LABELS)}. Return me only the name of the
-            category from that list that can match the following phrase :
+        system_prompt = f"""Please give me a short summary (like 3 phrases) of
+        the following email content which is actually a python dictionary
+        containing the subject, the From value, the To value and the decoded
+        body which can be HTML-formatted :
         """
 
 
-        response = call_ramalama_api('completion', 'post', prompt + email_content)
-        print(response)
-        response_content = print(response['content'])
-        try:
-            category = json.loads(response_content)['category']
-        except Exception:
-            return
-        return category if response_content in CATEGORY_LABELS else "Other"
+        response = call_ramalama_api('completion', 'post', system_prompt + str(email_content))
+        print(response['content'])
     except Exception as e:
         logging.error(f"Error in Ollama categorization: {str(e)}")
         return "Other"
 
+
 def main():
     client = gmail_client()
-    emails = fetch_emails(client, build_query(datetime.datetime.now() - datetime.timedelta(minutes=1)))
+    date = datetime.datetime.now() - datetime.timedelta(days=2)
+    gmail_query = (f"is:unread is:starred " +
+                   f"in:inbox after:{round(date.timestamp())}")
+    emails = fetch_emails(client, gmail_query)
     for email in emails:
-        print(categorize_email_with_ollama(email['subject'] + '\n' + email['snippet']))
+        print('-------------------------------------------------------')
+        print(f'From: {email['from']}, Subject: {email['subject']}')
+        summarize_email_with_ollama(email)
+        print('-------------------------------------------------------\n\n\n')
+
 
 if __name__ == "__main__":
     main()
